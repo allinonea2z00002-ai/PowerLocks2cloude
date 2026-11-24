@@ -16,13 +16,10 @@ import android.os.Looper
 import android.os.SystemClock
 import android.util.Log
 import android.view.Gravity
-import android.view.KeyEvent
 import android.view.View
-import android.view.ViewGroup
 import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
-import android.widget.FrameLayout
 import android.widget.LinearLayout
 
 /**
@@ -36,17 +33,6 @@ import android.widget.LinearLayout
  * The protection state is cached from SharedPreferences, so events do not read storage.
  * Settings / uninstall pages that show "PowerLock" are sent Home when "protect app settings" is on.
  */
-// লেখা ব্লকের পর্দা: Back চাপলে এই ভিউ থেকে সংকেত যায় (ScreenGuard-এর Cover-এর মতো)।
-private class TextCover(c: Context, val onBack: () -> Unit) : FrameLayout(c) {
-    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
-        if (event.keyCode == KeyEvent.KEYCODE_BACK) {
-            if (event.action == KeyEvent.ACTION_UP) onBack()
-            return true
-        }
-        return super.dispatchKeyEvent(event)
-    }
-}
-
 class PowerBlockService : AccessibilityService() {
 
     private val handler = Handler(Looper.getMainLooper())
@@ -82,13 +68,6 @@ class PowerBlockService : AccessibilityService() {
     private var lastFocusAction = 0L
 
     private var lastKeepAliveCheck = 0L // throttles the revive check (once per 30s)
-
-    // লেখা ব্লক (ScreenGuard থেকে): টাইমার/লোকেশন লক ছাড়াও চলে, শুধু নিজের সুইচের উপর নির্ভর করে।
-    @Volatile
-    private var textBlockOn = false
-    private var lastTextScan = 0L
-    private var contentOverlay: View? = null
-    private var contentAttached = false
 
     // English + Bengali: the phone's system language decides the menu text.
     private val triggers = listOf(
@@ -161,7 +140,6 @@ class PowerBlockService : AccessibilityService() {
         val st = Store.settings(this)
         focusOn = st.getBoolean("focus_on", false)
         focusApps = (st.getString("focus_apps", "") ?: "").split(",").filter { it.isNotEmpty() }.toSet()
-        textBlockOn = st.getBoolean("text_block", false)
     }
 
     private fun protecting(): Boolean = (active && System.currentTimeMillis() < endAt) || locProtecting
@@ -191,10 +169,6 @@ class PowerBlockService : AccessibilityService() {
         val pkg = e.packageName?.toString() ?: return
         try {
             maybeReviveKeepAlive() // the system re-binds this service, so it revives the keep-alive service
-            // লেখা ব্লক: নিজের অ্যাপ আর সিস্টেম UI ছাড়া সব অ্যাপে, টাইমার চলুক বা না চলুক।
-            if (textBlockOn && pkg != packageName && contentOverlay == null && !pkg.contains("systemui")) {
-                if (onTextBlockEvent(e)) return
-            }
             if (pkg.contains("systemui")) {
                 // the power menu: even when the flag is not set yet, the location lock may apply
                 onSystemUi(e)
@@ -274,149 +248,6 @@ class PowerBlockService : AccessibilityService() {
         lastFocusAction = now
         Extra.logAttempt(this, "focus")
         performGlobalAction(GLOBAL_ACTION_HOME)
-    }
-
-    // ---------- লেখা ব্লক (ScreenGuard থেকে) ----------
-
-    /** স্ক্রিনের লেখায় কীওয়ার্ড বা ব্লক করা সাইটের ঠিকানা থাকলে ব্লক পর্দা দেখায়। */
-    private fun onTextBlockEvent(e: AccessibilityEvent): Boolean {
-        if (e.eventType != AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED &&
-            e.eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED
-        ) return false
-        val now = SystemClock.uptimeMillis()
-        if (now - lastTextScan < 600) return false
-        lastTextScan = now
-        val root = rootInActiveWindow ?: return false
-        val sb = StringBuilder()
-        collectText(root, sb)
-        if (sb.isEmpty()) return false
-        val rawLower = sb.toString().lowercase()
-        // সাইট: ঠিকানায় ডট থাকে, তাই কাঁচা লেখাতেই মেলানো হয় (যেমন ব্রাউজারের অ্যাড্রেস বার)।
-        val sites = Store.textSites(this).map { it.lowercase() }.filter { it.isNotEmpty() }
-        if (sites.any { rawLower.contains(it) }) {
-            triggerTextBlock()
-            return true
-        }
-        var text = normText(rawLower)
-        for (w in Store.textWhite(this).map { normText(it) }.filter { it.isNotEmpty() }) {
-            text = text.replace(w, " ")
-        }
-        val words = Store.textWords(this).map { normText(it) }.filter { it.isNotEmpty() }
-        if (words.any { text.contains(it) }) {
-            triggerTextBlock()
-            return true
-        }
-        return false
-    }
-
-    private fun collectText(n: AccessibilityNodeInfo?, sb: StringBuilder) {
-        if (n == null) return
-        n.text?.let { sb.append(it).append(' ') }
-        n.contentDescription?.let { sb.append(it).append(' ') }
-        for (i in 0 until n.childCount) collectText(n.getChild(i), sb)
-    }
-
-    // ScreenGuard-এর মতোই: p0rn / s3x ধরতে 0->o, 1->i, 3->e, @->a, $->s বদলে নেওয়া হয়।
-    private fun normText(s: String) = s.lowercase()
-        .replace('0', 'o').replace('1', 'i').replace('3', 'e')
-        .replace('@', 'a').replace('$', 's')
-        .replace(Regex("[^\\p{L}\\p{M}\\s]"), " ")
-        .replace(Regex("\\s+"), " ").trim()
-
-    private fun triggerTextBlock() {
-        handler.post {
-            if (contentOverlay != null || !textBlockOn) return@post
-            showContentOverlay()
-        }
-    }
-
-    private fun showContentOverlay() {
-        if (contentAttached) return
-        try {
-            val cover = TextCover(this) { dismissContentOverlay() }
-            cover.setBackgroundColor(Color.parseColor("#0B1020"))
-            val col = LinearLayout(this)
-            col.orientation = LinearLayout.VERTICAL
-            col.gravity = Gravity.CENTER
-            col.setPadding(dp(32), dp(32), dp(32), dp(32))
-            col.addView(IconView(this, Ic.SHIELD, C.primary), lp(dp(104), dp(104)))
-            val title = tv(L.t("This is now blocked", "এটা এখন ব্লক করা হয়েছে"), 26f, C.text, 1)
-            title.gravity = Gravity.CENTER
-            col.addView(title, lp(WRAP, WRAP, t = dp(28)))
-            val sub = tv(
-                L.t("A blocked word or site was found on the screen.", "স্ক্রিনে ব্লক করা শব্দ বা সাইট পাওয়া গেছে।"),
-                16f, C.muted
-            )
-            sub.gravity = Gravity.CENTER
-            col.addView(sub, lp(WRAP, WRAP, t = dp(12)))
-            val back = tv(L.t("← Go back", "← ফিরে যান"), 17f, Color.WHITE, 1)
-            back.gravity = Gravity.CENTER
-            back.background = rounded(C.primary, dp(16).toFloat())
-            back.setPadding(dp(40), dp(14), dp(40), dp(14))
-            back.setOnClickListener { dismissContentOverlay() }
-            col.addView(back, lp(WRAP, WRAP, t = dp(36)))
-            val hint = tv(L.t("Or press the Back button", "অথবা Back বাটন চাপুন"), 13f, C.muted)
-            hint.gravity = Gravity.CENTER
-            col.addView(hint, lp(WRAP, WRAP, t = dp(14)))
-            cover.addView(
-                col,
-                FrameLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT,
-                    ViewGroup.LayoutParams.MATCH_PARENT
-                )
-            )
-            val wm = getSystemService(WINDOW_SERVICE) as WindowManager
-            val params = WindowManager.LayoutParams(
-                WindowManager.LayoutParams.MATCH_PARENT,
-                WindowManager.LayoutParams.MATCH_PARENT,
-                WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
-                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
-                    WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
-                PixelFormat.OPAQUE
-            )
-            wm.addView(cover, params)
-            contentOverlay = cover
-            contentAttached = true
-            cover.isFocusable = true
-            cover.isFocusableInTouchMode = true
-            cover.requestFocus()
-        } catch (ex: Exception) {
-            Log.e(TAG, "showContentOverlay failed", ex)
-            contentAttached = false
-        }
-    }
-
-    // Back চাপলে ব্লক পর্দা সরে যায় এবং আগের পেজে ফেরা হয়।
-    private fun dismissContentOverlay() {
-        val o = contentOverlay ?: return
-        contentOverlay = null
-        contentAttached = false
-        try {
-            (getSystemService(WINDOW_SERVICE) as WindowManager).removeView(o)
-        } catch (ex: Exception) {
-            Log.e(TAG, "dismissContentOverlay failed", ex)
-        }
-        performGlobalAction(GLOBAL_ACTION_BACK)
-    }
-
-    private fun removeContentOverlay() {
-        val o = contentOverlay ?: return
-        contentOverlay = null
-        contentAttached = false
-        try {
-            (getSystemService(WINDOW_SERVICE) as WindowManager).removeView(o)
-        } catch (ex: Exception) {
-            Log.e(TAG, "removeContentOverlay failed", ex)
-        }
-    }
-
-    // ব্লক পর্দা থাকাকালীন ফোনের Back বাটনের চাপ ধরা।
-    override fun onKeyEvent(event: KeyEvent?): Boolean {
-        if (event != null && contentOverlay != null && event.keyCode == KeyEvent.KEYCODE_BACK) {
-            if (event.action == KeyEvent.ACTION_UP) handler.post { dismissContentOverlay() }
-            return true
-        }
-        return false
     }
 
     private fun looksLikePowerMenu(e: AccessibilityEvent): Boolean {
@@ -558,7 +389,6 @@ class PowerBlockService : AccessibilityService() {
     private fun cleanup() {
         handler.removeCallbacksAndMessages(null)
         hideOverlay()
-        removeContentOverlay()
         if (receiverOn) {
             receiverOn = false
             try {
