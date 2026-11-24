@@ -15,10 +15,12 @@ import android.graphics.drawable.GradientDrawable
 import android.net.Uri
 import android.os.Build
 import android.provider.Settings
+import android.text.InputType
 import android.util.Log
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
+import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.TextView
 import java.util.Calendar
@@ -884,6 +886,90 @@ class SettingsScreen(private val a: MainActivity) {
         else L.t("Changes apply from the next session.", "পরিবর্তন পরের সেশন থেকে কার্যকর হবে।")
         strictCard.addView(a.tv(note, 12f, if (locked) C.warn else C.muted), lp(MATCH, WRAP, t = a.dp(8)))
         col.addView(strictCard, lp(MATCH, WRAP, b = a.dp(12)))
+
+        // লেখা ব্লক (ScreenGuard থেকে): টাইমার ছাড়াও চলে
+        val textCard = a.card()
+        textCard.addView(a.section(L.t("Text block", "লেখা ব্লক")))
+        val textPrefs = Store.settings(a)
+        textCard.addView(
+            glowOption(
+                L.t("Block bad words and sites", "খারাপ শব্দ ও সাইট ব্লক"),
+                L.t("When a blocked word or site appears on screen, the whole screen is blocked until Back.", "স্ক্রিনে ব্লক করা শব্দ বা সাইট এলে Back চাপা পর্যন্ত পুরো পর্দা ব্লক থাকবে।"),
+                textPrefs.getBoolean("text_block", false),
+                false
+            ) { v ->
+                textPrefs.edit().putBoolean("text_block", v).apply()
+                Store.kickService(a)
+            },
+            lp(MATCH, WRAP, t = a.dp(8))
+        )
+        fun editList(title: String, current: List<String>, onSave: (List<String>) -> Unit) {
+            val e = EditText(a)
+            e.setText(current.joinToString("\n"))
+            e.setTextColor(C.text)
+            e.setHintTextColor(C.muted)
+            e.textSize = 15f
+            e.gravity = Gravity.TOP or Gravity.START
+            e.inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE
+            e.minLines = 6
+            e.setPadding(a.dp(16), a.dp(12), a.dp(16), a.dp(12))
+            e.background = rounded(C.card2, a.dp(12).toFloat())
+            a.dlg()
+                .setTitle(title)
+                .setView(e)
+                .setPositiveButton(L.t("Save", "সংরক্ষণ")) { _, _ ->
+                    val list = e.text.toString().split("\n").map { it.trim() }.filter { it.isNotEmpty() }
+                    onSave(list)
+                    a.go(3, false)
+                }
+                .setNegativeButton(L.t("Cancel", "বাতিল"), null)
+                .show()
+        }
+        textCard.addView(
+            a.row(
+                L.t("Keywords", "কীওয়ার্ড") + " (${Store.textWords(a).size})",
+                L.t("One per line", "প্রতি লাইনে একটি করে"),
+                a.tv("›", 22f, C.muted)
+            ) {
+                editList(L.t("Keywords", "কীওয়ার্ড"), Store.textWords(a)) { Store.saveTextWords(a, it) }
+            }
+        )
+        textCard.addView(
+            a.row(
+                L.t("Blocked sites", "ব্লক করা সাইট") + " (${Store.textSites(a).size})",
+                L.t("One per line, e.g. pornhub.com", "প্রতি লাইনে একটি, যেমন pornhub.com"),
+                a.tv("›", 22f, C.muted)
+            ) {
+                editList(L.t("Blocked sites", "ব্লক করা সাইট"), Store.textSites(a)) { Store.saveTextSites(a, it) }
+            }
+        )
+        textCard.addView(
+            a.row(
+                L.t("Whitelist words", "ছাড়ের শব্দ"),
+                L.t("These words are ignored", "এই শব্দগুলো ধরা হবে না"),
+                a.tv("›", 22f, C.muted)
+            ) {
+                editList(L.t("Whitelist words", "ছাড়ের শব্দ"), Store.textWhite(a)) { Store.saveTextWhite(a, it) }
+            }
+        )
+        val adultBtn = a.outlineBtn(L.t("Add adult keywords", "অ্যাডাল্ট কীওয়ার্ড যোগ করুন"), C.primary)
+        adultBtn.setOnClickListener {
+            Store.addAdultTextWords(a)
+            a.toast(L.t("Adult keywords added", "অ্যাডাল্ট কীওয়ার্ড যোগ করা হয়েছে"))
+            a.go(3, false)
+        }
+        textCard.addView(adultBtn, lp(MATCH, a.dp(48), t = a.dp(10)))
+        textCard.addView(
+            a.tv(
+                L.t(
+                    "Works without the timer or location lock. Only Accessibility needs to be on. No photo/video AI check in this.",
+                    "টাইমার বা লোকেশন লক ছাড়াও কাজ করে। শুধু Accessibility অন থাকলেই হবে। এতে ছবি/ভিডিওর AI চেক নেই।"
+                ),
+                12f, C.muted
+            ),
+            lp(MATCH, WRAP, t = a.dp(8))
+        )
+        col.addView(textCard, lp(MATCH, WRAP, b = a.dp(12)))
 
         // location lock first, then focus mode (defined in Features.kt)
         col.addView(a.locationCard(), lp(MATCH, WRAP, b = a.dp(12)))
